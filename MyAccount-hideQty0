@@ -1,0 +1,25 @@
+<script nonce="{{nonce}}">
+(function () {
+  function getQtyFromTitle(text) {
+    if (!text) return NaN;
+    text = text.replace(/\u00A0/g, ' ').trim();
+    var match = text.match(/^(\d+)\s*(?:×|x|\u00D7)\s*/i);
+    return match ? parseInt(match[1], 10) : NaN;
+  }
+
+  function hideZeroQtyOrderItems() {
+    document.querySelectorAll('.account-product.account-product--alignMiddle').forEach(function (product) {
+      var title = product.querySelector('.account-product-title');
+      if (!title) return;
+
+      var qty = getQtyFromTitle(title.textContent);
+      if (qty === 0) product.style.display = 'none';
+    });
+  }
+
+  window.hideZeroQtyOrderItems = hideZeroQtyOrderItems;
+
+  // wait for Stencil render
+  setTimeout(hideZeroQtyOrderItems, 400);
+})();
+</script>
