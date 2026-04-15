@@ -1,0 +1,137 @@
+<script>
+(function () {
+  'use strict';
+
+  async function getDiscountData() {
+    try {
+      const res = await fetch('/api/storefront/carts?include=lineItems.physicalItems.options,lineItems.digitalItems.options', {
+        credentials: 'same-origin'
+      });
+      const carts = await res.json();
+      if (!carts || !carts.length) return null;
+
+      const cart = carts[0];
+      const currency = cart.currency?.symbol || '$';
+
+      let itemDiscounts = 0;
+      const allItems = [
+        ...(cart.lineItems?.physicalItems || []),
+        ...(cart.lineItems?.digitalItems || [])
+      ];
+      allItems.forEach(item => {
+        if (item.extendedListPrice && item.extendedSalePrice) {
+          itemDiscounts += (item.extendedListPrice - item.extendedSalePrice);
+        }
+      });
+
+      const cartDiscount = cart.discountAmount || 0;
+      const totalDiscount = itemDiscounts > cartDiscount ? itemDiscounts : cartDiscount;
+
+      return { totalDiscount, currency };
+    } catch (e) {
+      console.error('[Discount Inject] Cart fetch failed:', e);
+      return null;
+    }
+  }
+
+  function buildDiscountRow(amount, symbol) {
+    const formatted = symbol + parseFloat(amount).toFixed(2);
+    const row = document.createElement('div');
+    row.id = 'b2b-discount-line-item';
+
+    // Mirror the class structure of sibling rows so it inherits
+    // the checkout's own spacing, typography and border styles
+    row.className = 'cart-priceItem optimizedCheckout-contentPrimary';
+
+    row.setAttribute('style', [
+      'display: flex',
+      'justify-content: space-between',
+      'align-items: center',
+      'padding: 8px 0',
+      'color: #c00000'
+    ].join(';'));
+
+    row.innerHTML = `
+      <span class="cart-priceItem-label" style="font-weight:600;">
+        <span>Discount</span>
+      </span>
+      <span class="cart-priceItem-value" style="font-weight:600;">-${formatted}</span>
+    `;
+    return row;
+  }
+
+  function tryInject(discountData) {
+    if (!discountData || discountData.totalDiscount <= 0) return;
+    if (document.getElementById('b2b-discount-line-item')) return;
+
+    // Find the shipping row — this is our anchor point.
+    // The B2B/Optimized Checkout renders shipping with these selectors.
+    const shippingRowSelectors = [
+      '[data-test="cart-price-shipping"]',
+      '.cart-priceItem--shipping',
+      '[class*="cart-priceItem"][class*="shipping"]',
+      // Fallback: find any row whose label text contains "Shipping"
+      ...Array.from(document.querySelectorAll('.cart-priceItem, [data-test*="cart-price"]'))
+             .filter(el => el.textContent.trim().toLowerCase().startsWith('shipping'))
+    ];
+
+    let shippingRow = null;
+
+    // Try attribute/class selectors first
+    const staticSelectors = [
+      '[data-test="cart-price-shipping"]',
+      '.cart-priceItem--shipping',
+      '[class*="cart-priceItem"][class*="shipping"]',
+    ];
+    for (const sel of staticSelectors) {
+      shippingRow = document.querySelector(sel);
+      if (shippingRow) break;
+    }
+
+    // Fallback: scan all price rows for one labelled "Shipping"
+    if (!shippingRow) {
+      const allRows = document.querySelectorAll(
+        '.cart-priceItem, [data-test^="cart-price"], .cart-section .form-legend'
+      );
+      for (const row of allRows) {
+        const labelEl = row.querySelector('.cart-priceItem-label, [data-test*="label"]');
+        const text = (labelEl || row).textContent.trim().toLowerCase();
+        if (text.startsWith('shipping')) {
+          shippingRow = row;
+          break;
+        }
+      }
+    }
+
+    if (!shippingRow) return; // Checkout hasn't rendered shipping row yet — observer will retry
+
+    const discountRow = buildDiscountRow(discountData.totalDiscount, discountData.currency);
+
+    // Insert BEFORE the shipping row — placing it between subtotal and shipping
+    shippingRow.parentNode.insertBefore(discountRow, shippingRow);
+    console.info('[Discount Inject] Discount row inserted before shipping line.');
+  }
+
+  async function init() {
+    const discountData = await getDiscountData();
+    if (!discountData || discountData.totalDiscount <= 0) return;
+
+    tryInject(discountData);
+
+    const observer = new MutationObserver(() => {
+      tryInject(discountData);
+    });
+
+    const root = document.getElementById('checkout-app') || document.body;
+    observer.observe(root, { childList: true, subtree: true });
+
+    setTimeout(() => observer.disconnect(), 30000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => setTimeout(init, 500));
+  } else {
+    setTimeout(init, 500);
+  }
+})();
+</script>
