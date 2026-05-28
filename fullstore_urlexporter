@@ -1,0 +1,247 @@
+"""
+BigCommerce URL Exporter
+========================
+Fetches all URLs from a BigCommerce store via the Management API and exports
+them to a CSV file. Covers: homepage, products, categories, web pages, and blog posts.
+
+Usage:
+    1. Fill in your credentials in the CONFIG section below.
+    2. Run: python bigcommerce_url_export.py
+    3. Output: bigcommerce_urls.csv
+
+Requirements: Python 3.7+, requests library
+    Install with: pip install requests
+"""
+
+import csv
+import time
+import sys
+from typing import Union
+import requests
+
+# =============================================================================
+# CONFIG — fill in your store credentials
+# =============================================================================
+
+STORE_HASH   = ""    # e.g. abc123xyz
+ACCESS_TOKEN = ""  # e.g. abc123xyz789
+STORE_URL    = ""  # No trailing slash
+
+OUTPUT_FILE          = "bigcommerce_urls.csv"
+RATE_LIMIT_PAUSE_SEC = 0.25  # Pause between API requests
+
+# =============================================================================
+# API CLIENT
+# =============================================================================
+
+BASE_URL = f"https://api.bigcommerce.com/stores/{STORE_HASH}"
+
+HEADERS = {
+    "X-Auth-Token": ACCESS_TOKEN,
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+}
+
+
+def bc_get(endpoint: str, params: dict = None) -> Union[dict, list]:
+    """Make a single GET request to the BigCommerce API."""
+    url = BASE_URL + endpoint
+    response = requests.get(url, headers=HEADERS, params=params, timeout=30)
+
+    if response.status_code >= 400:
+        print(f"  [ERROR] HTTP {response.status_code} on {url}")
+        return {}
+
+    return response.json()
+
+
+# =============================================================================
+# PAGINATION HELPERS
+# =============================================================================
+
+def fetch_all_v2(endpoint: str, limit: int = 250) -> list:
+    """Paginate a v2 endpoint — stops when an empty page is returned."""
+    all_items = []
+    page = 1
+
+    while True:
+        data = bc_get(endpoint, params={"page": page, "limit": limit})
+
+        if not data or not isinstance(data, list):
+            break
+
+        all_items.extend(data)
+
+        if len(data) < limit:
+            break
+
+        page += 1
+        time.sleep(RATE_LIMIT_PAUSE_SEC)
+
+    return all_items
+
+
+def fetch_all_v3(endpoint: str, limit: int = 250) -> list:
+    """Paginate a v3 endpoint — uses meta.pagination.total_pages."""
+    all_items = []
+    page = 1
+
+    while True:
+        response = bc_get(endpoint, params={"page": page, "limit": limit})
+        items = response.get("data", [])
+
+        if not items:
+            break
+
+        all_items.extend(items)
+
+        total_pages = response.get("meta", {}).get("pagination", {}).get("total_pages", 1)
+        if page >= total_pages:
+            break
+
+        page += 1
+        time.sleep(RATE_LIMIT_PAUSE_SEC)
+
+    return all_items
+
+
+# =============================================================================
+# FETCHERS — one per resource type
+# =============================================================================
+
+def fetch_homepage() -> list:
+    return [{
+        "type":       "Homepage",
+        "id":         "",
+        "name":       "Homepage",
+        "url":        STORE_URL.rstrip("/") + "/",
+        "status":     "Visible",
+        "extra_info": "",
+    }]
+
+
+def fetch_products() -> list:
+    print("Fetching products...")
+    rows = []
+
+    for p in fetch_all_v3("/v3/catalog/products"):
+        path = p.get("custom_url", {}).get("url", "")
+        url  = (STORE_URL.rstrip("/") + path) if path else ""
+
+        rows.append({
+            "type":       "Product",
+            "id":         p.get("id", ""),
+            "name":       p.get("name", ""),
+            "url":        url,
+            "status":     "Visible" if p.get("is_visible") else "Hidden",
+            "extra_info": f"SKU: {p.get('sku', '')}",
+        })
+
+    print(f"  Found {len(rows)} products.")
+    return rows
+
+
+def fetch_categories() -> list:
+    print("Fetching categories...")
+    rows = []
+
+    for c in fetch_all_v3("/v3/catalog/categories"):
+        path = c.get("custom_url", {}).get("url", "")
+        url  = (STORE_URL.rstrip("/") + path) if path else ""
+
+        rows.append({
+            "type":       "Category",
+            "id":         c.get("id", ""),
+            "name":       c.get("name", ""),
+            "url":        url,
+            "status":     "Visible" if c.get("is_visible") else "Hidden",
+            "extra_info": f"Parent ID: {c.get('parent_id', 0)}",
+        })
+
+    print(f"  Found {len(rows)} categories.")
+    return rows
+
+
+def fetch_pages() -> list:
+    print("Fetching web pages...")
+    rows = []
+
+    for p in fetch_all_v2("/v2/pages"):
+        path = p.get("url", "")
+        url  = (STORE_URL.rstrip("/") + "/" + path.lstrip("/")) if path else ""
+
+        rows.append({
+            "type":       "Web Page",
+            "id":         p.get("id", ""),
+            "name":       p.get("name", ""),
+            "url":        url,
+            "status":     "Visible" if p.get("is_visible") else "Hidden",
+            "extra_info": f"Type: {p.get('type', '')}",
+        })
+
+    print(f"  Found {len(rows)} web pages.")
+    return rows
+
+
+def fetch_blog_posts() -> list:
+    print("Fetching blog posts...")
+    rows = []
+
+    for p in fetch_all_v2("/v2/blog/posts"):
+        url = p.get("url", "")
+        if url and not url.startswith("http"):
+            url = STORE_URL.rstrip("/") + "/" + url.lstrip("/")
+
+        rows.append({
+            "type":       "Blog Post",
+            "id":         p.get("id", ""),
+            "name":       p.get("title", ""),
+            "url":        url,
+            "status":     "Published" if p.get("is_published") else "Draft",
+            "extra_info": f"Author: {p.get('author', '')}",
+        })
+
+    print(f"  Found {len(rows)} blog posts.")
+    return rows
+
+
+# =============================================================================
+# CSV WRITER
+# =============================================================================
+
+def write_csv(rows: list, filename: str) -> None:
+    fieldnames = ["type", "id", "name", "url", "status", "extra_info"]
+    headers    = ["Type", "ID", "Name / Title", "URL", "Status", "Extra Info"]
+
+    with open(filename, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig adds BOM for Excel
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writerow(dict(zip(fieldnames, headers)))
+        writer.writerows(rows)
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+    print("\n=== BigCommerce URL Exporter ===\n")
+
+    if STORE_HASH == "your_store_hash" or ACCESS_TOKEN == "your_access_token":
+        print("[ERROR] Please update STORE_HASH and ACCESS_TOKEN in the CONFIG section.")
+        sys.exit(1)
+
+    all_rows = (
+        fetch_homepage()
+        + fetch_products()
+        + fetch_categories()
+        + fetch_pages()
+        + fetch_blog_posts()
+    )
+
+    write_csv(all_rows, OUTPUT_FILE)
+
+    print(f"\n✅ Done! {len(all_rows)} URLs exported to: {OUTPUT_FILE}\n")
+
+
+if __name__ == "__main__":
+    main()
